@@ -11,4 +11,6 @@ We use the Crank-Nicolson method to solve a 1D time-independent Schrödinger equ
 
 ## Animation
 
-![0.125x playbackspeed animation](visuals/(0.125x)4KSidebySidePsi2.mp4)
+<video src="https://raw.githubusercontent.com/armenkarakashian/1D-Particle-Detection-ABC/main/visuals/(0.125x)4KSidebySidePsi2.mp4" controls="controls" style="max-width: 100%;">
+   Your browser does not support the video tag.
+</video>
