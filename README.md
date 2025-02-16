@@ -3,7 +3,7 @@
 This project provides a visual for the evolution of a particle's wave function in one space dimension, where hard detectors are represented mathematically as absorbing boundary conditions in a 1D Schrödinger model. This idea was introduced [here](https://arxiv.org/abs/1911.12730).
 
 ### Absorbing boundary condition
-![Absorbing boundary condition](visuals/abc.png)
+<img src="visuals/abc.png" alt="Absorbing boundary condition" width="150">
 
 ## Methodology
 
