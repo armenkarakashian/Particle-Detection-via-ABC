@@ -4,6 +4,7 @@ This project provides a visual for the evolution of a particle's wave function i
 
 ### Absorbing boundary condition
 On the [0,1] interval, we use this absorbing boundary condition on the endpoints. For k > 0, probability "flows out" from [0,1].
+
 <img src="visuals/abc.png" alt="Absorbing boundary condition" width="150">
 
 ## Methodology
