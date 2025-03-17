@@ -2,170 +2,196 @@
 using DifferentialEquations, LinearAlgebra, Plots, FFMPEG, Dates, Serialization
 using Plots.PlotMeasures
 
-@info "Packages loaded, solving PDE..."
+@info "Packages loaded, preparing to solve PDE(s)..."
 
-ENV["GKSwstype"] = "nul" #   For animation creation without an active monitor (for job scheduling, other users can comment this out if desired)
+ENV["GKSwstype"] = "nul"  #    For animation creation without an active monitor
 gr()
 
-Plots.default(
-    size = (3840, 2160)
-)
-title_font = font("Helvetica", 42)  # Replace 18 with your desired font size
+#    Plot styling
+Plots.default(size=(1920,1080))
+title_font = font("Helvetica", 42)
 other_font = font("Helvetica", 30)
-default(titlefont=title_font, guidefont=other_font, tickfont=other_font, legendfont=other_font)
-#=
-# FOR LOADING EXISTING SOLUTION TO CREATE ANIMATION
+default(
+    titlefont  = title_font,
+    guidefont  = other_font,
+    tickfont   = other_font,
+    legendfont = other_font
+)
 
-sol = deserialize(joinpath("solution_data", "side_by_side_sol.jls"))
-t_vals = Array(sol.t)
-abs2_at_x1 = [abs2(Array(sol.u[i])[end]) for i in 1:length(sol.t)]
-max_abs2_left  = maximum([maximum(abs2.(Array(u))) for u in sol.u])
-max_abs2_right = maximum(abs2_at_x1)
-ymax_left  = 1.1 * max_abs2_left
-ymax_right = 1.1 * max_abs2_right
+solutions = Dict{Float32, ODESolution}()
+ks = []
+global tN = nothing
+global N = nothing
 
-anim = @animate for i in 1:length(t_vals)
-    p1 = plot(x,
-              abs2.(Array(sol.u[i])),
-              xlabel="x", ylabel="|ψ(x,t)|²",
-              title="|ψ(x,t)|² at t = $(round(t_vals[i], digits=3))",
-              legend=false, ylim=(0, ymax_left), left_margin=100)
+sol_dir = "solution_data"
+
+#   Load saved solutions
+if length(ARGS) > 0
+    for sol_file in ARGS
+        k = parse(Float32, sol_file["k"])
+
+        newN = parse(Int, sol_file["N"])
+        if N == nothing
+            N = newN
+        elseif N != newN
+            error("Number of spatial points (N) must match for all loaded solutions!")
+        end
+
+        newtN = parse(Int, sol_file["tN"])
+        if tN == nothing
+            tn = newtN
+        elseif tN != newtN
+            error("Number of frames (tN) must match for all loaded solutions!")
+        end
+
+        sol = deserialize(joinpath(sol_dir, sol_file))
+        solutions[k] = sol
+    end
+else
+    #   Parameters
+    ks  = [0.5f0, 1.0f0, 2.0f0]  #    All values of k
+    global N   = 864                    #    Number of spatial points
+    global tN  = 1728                   #    Number of frames
+    L   = 1.0f0
+    dx  = L / (N - 1)
+    x   = range(0f0, stop=L, length=N)
+
+    #    Initial wave function is Gaussian wave packet
+    psi0 = exp.(-((x .- 0.5f0).^2) ./ (2 * 0.1f0^2)) .* ComplexF32(1, 0)
+
+    #    Schrödinger equation ODE for a given k
+    function schrodinger!(dpsi_dt, psi, p, t)
+        k1, k2, dx = p
+        @inbounds begin
+            #    Initialize the derivative vector with complex entries
+            fill!(dpsi_dt, 0im)
+        
+            #    Derivative at interior points
+            @inbounds for j in 2:length(psi)-1
+                dpsi_dt[j] = im * (psi[j+1] - 2psi[j] + psi[j-1]) / dx^2
+            end
+        
+            #    Absorbing boundary at x=0
+            dpsi_dt[1] = im * ((psi[1] / (1 - im*k1*dx)) - 2*psi[1] + psi[2]) / dx^2
+            #    Absorbing boundary at x=1
+            dpsi_dt[end] = im * (psi[end-1] - 2*psi[end] + (psi[end] / (1 - im*k2*dx))) / dx^2
+        end
+    end
+
+    #    Time span
+    tspan = (0.0f0, 1.5f0)
+
+    #    Progress callback (for printing)
+    time_step_to_print = 0.05
+    next_time_trigger = Ref(tspan[1])
+    function condition(u, t, integrator)
+        if t >= next_time_trigger[]
+            next_time_trigger[] += time_step_to_print
+            return true
+        else
+            return false
+        end
+    end
+    function print_progress(integrator)
+        fraction = integrator.t / integrator.sol.prob.tspan[end] 
+        @info "PDE Progress: $(round(fraction * 100, digits=1))% (t = $(round(integrator.t, digits=2)))"
+    end
+    progress_cb = DiscreteCallback(condition, print_progress)
+
+    #    Solve for each value of k
+    for k in ks
+        @info "Solving PDE for k = $k ..."
+        prob = ODEProblem(
+            schrodinger!,
+            psi0,
+            tspan,
+            (k, k, dx)
+        )
     
-    y_data = abs2_at_x1[1:i]
-    t_data = t_vals[1:i]
-    p2 = plot(t_data,
-              y_data,
-              xlabel="t", ylabel="|ψ(1,t)|²",
-              title="Value at x=1 over time",
-              legend=false, xlim=(0, t_vals[end]), ylim=(0, ymax_right), left_margin=100)
+        sol = solve(
+            prob,
+            TRBDF2(autodiff=false),
+            saveat = range(tspan[1], tspan[2], length=tN),
+            callback = progress_cb
+        )
     
-    x_curr = t_data[end]
-    y_curr = y_data[end]
-    plot!(p2, [0, x_curr], [y_curr, y_curr], linewidth=1)
-    plot!(p2, [x_curr, x_curr], [0, y_curr], linewidth=1)
+        solutions[k] = sol
     
-    plot(p1, p2, layout=(1,2))
-end
+        file_path = joinpath(sol_dir, "solution_k=$(k)_N=$(N)_tN=$(tN).jls")
+        serialize(file_path, sol)
+        println("Saved solution for k = $k to $file_path")
 
-mp4(anim, "loaded_solution_animation.mp4", fps=30)
-println("Animation from loaded solution complete!")
-=#
-
-# Parameters
-k1 = 1.0f0     #    Set absorbing boundary condition constant to 1 for simplicity
-k2 = k1        
-N  = 864        #    number of points to break down [0,1] space interval
-tN = 1728       #    animation frames. 1.5 seconds, 144 frames/s, intended to slow down to 0.125x speed
-L  = 1.0f0
-dx = L / (N - 1)
-
-#   Break up [0,1] into subintervals
-x = range(0f0, stop=L, length=N)
-
-#   Gaussian wave packet as initial wave function
-psi0 = exp.(-((x .- 0.5f0).^2) ./ (2 * 0.1f0^2)) .* ComplexF32(1, 0)
-
-#   Schrödinger equation ODE
-function schrodinger(psi, p, t)
-    #   Initialize data structure to store derivative at every point
-    dpsi_dt = zeros(ComplexF32, length(psi))
-
-    #   Approximate derivative for interior points
-    dpsi_dt[2:N-1] .= im * (psi[3:N] - 2 .* psi[2:N-1] + psi[1:N-2]) / dx^2
-
-    #   Derivative for endpoints (using ABC)
-    dpsi_dt[1] = im * ((psi[1] / (1 - im * k1 * dx)) - 2*psi[1] + psi[2])   / dx^2
-    dpsi_dt[N] = im * ( psi[N-1] - 2*psi[N] + (psi[N] / (1 - im * k2 * dx)) ) / dx^2
-
-    return dpsi_dt
-end
-
-tspan = (0.0f0, 1.5f0)
-
-#   Define a callback condition that triggers every 0.05 units of time
-#   and a function that prints progress
-time_step_to_print = 0.05
-next_time_trigger = Ref(tspan[1])
-
-function condition(u, t, integrator)
-    if t >= next_time_trigger[]
-        next_time_trigger[] += time_step_to_print
-        return true
-    else
-        return false
+        @info "Finished solving for k = $k."
     end
 end
 
-function print_progress(integrator)
-    fraction = integrator.t / integrator.sol.prob.tspan[end] 
-    @info "PDE Progress: $(round(fraction * 100, digits=1))% (t = $(round(integrator.t, digits=2)))"
+@info "All PDE solutions complete/loaded. Creating side-by-side animation..."
+
+#   Frames
+t_vals = Array(first(solutions).second.t)
+
+#    For each solution, collect |psi|^2 for all times
+abs2_at_x1 = Dict{Float32, Vector{Float32}}()
+
+for k in ks
+    sol = solutions[k]
+
+    #    Evaluate |psi|^2 for each time at x = 1
+    local_abs2_at_x1 = [abs2(Array(sol.u[i])[end]) for i in 1:length(sol.t)]
+
+    abs2_at_x1[k] = local_abs2_at_x1
 end
 
-# Create a DiscreteCallback that uses the condition above
-progress_cb = DiscreteCallback(condition, print_progress)
+#      Y-limit for both plots (total probability is 1)
+ymax = 1.1
 
-#   Set up and solve the ODE problem (t from 0 to tL=1.5)
-prob = ODEProblem(schrodinger, psi0, (0.0f0, 1.5f0))
-sol  = solve(prob, TRBDF2(autodiff=false), saveat=range(0.0f0, 1.5f0, length=tN), callback=progress_cb)
-
-@info "Finished solving for k=1. Creating side-by-side animation..."
-
-#   Save the solution
-folder_name = "solution_data"
-isdir(folder_name) || mkdir(folder_name)
-serialize(joinpath(folder_name, "side_by_side_sol_N=$(N)_tN=$(tN).jls"), sol)
-@info "Solution saved as ", joinpath(folder_name, "side_by_side_sol_N=$(N)_tN=$(tN).jls")
-
-
-#   Put t vals onto CPU
-t_vals = Array(sol.t)
-
-#   Collect the values of |psi(1,t)|^2 over all times (and separately at x = 1)
-abs2_at_x1 = [abs2(Array(sol.u[i])[end]) for i in 1:length(sol.t)]
-
-#   Set the height of the graph based on maximum values attained by abs2
-max_abs2_left  = maximum([maximum(abs2.(Array(u))) for u in sol.u])
-max_abs2_right = maximum(abs2_at_x1)
-ymax = max(max_abs2_left, max_abs2_right) * 1.1
-
-#   Animation processing starts here
 anim = @animate for i in 1:length(t_vals)
-    #   Left animation: evolution of |psi|^2 on [0,1] over time
-    p1 = plot(x,
-              abs2.(Array(sol.u[i])),
-              xlabel="x", ylabel="|ψ(x,t)|²",
-              title = "|ψ|² at t = $(round(t_vals[i], digits=3))",
-              legend=false,
-              ylim=(0, ymax),
-              left_margin=25px,
-              linewidth=6)
+    #    Left panel: multiple lines for different k
+    p1 = plot(
+        xlim=(0,1), ylim=(0,ymax),
+        xlabel="x",
+        title="|ψ(x,t)|² at t = $(round(t_vals[i], digits=3))",
+        legend=:topright,
+        left_margin=25px,
+        linewidth=6
+    )
     
-    #   Right animation: trace of |psi|^2 at x = 1 over time
-    #   Plot from t = 1 to current time t_vals[i]
-    y_data = abs2_at_x1[1:i]
-    t_data = t_vals[1:i]
-    p2 = plot(t_data,
-              y_data,
-              xlabel="t", ylabel="",
-              title="|ψ|² at x=1",
-              legend=false,
-              xlim=(0, t_vals[end]),
-              ylim=(0, ymax),
-              left_margin=25px,
-              linewidth=6)
-
-    x_curr = t_data[end]
-    y_curr = y_data[end]
-    plot!(p2, [0, x_curr], [y_curr, y_curr], linewidth=3)
-    plot!(p2, [x_curr, x_curr], [0, y_curr], linewidth=3)
+    #    Add one series per k
+    for k in ks
+        sol = solutions[k]
+        plot!(p1,
+            x,
+            abs2.(Array(sol.u[i])),
+            label="k = $k"
+        )
+    end
+    
+    #    Right panel: multiple lines of |ψ(1,t)|² vs. t for different k
+    p2 = plot(
+        xlim=(0, t_vals[end]), ylim=(0,ymax),
+        xlabel="t",
+        title="k·|ψ(1,t)|² over time",
+        legend=:topright,
+        left_margin=25px,
+        linewidth=6
+    )
+    
+    for k in ks
+        t_data = t_vals[1:i]
+        y_data = k * abs2_at_x1[k][1:i]
+        plot!(p2,
+            t_data,
+            y_data,
+            label="k = $k"
+        )
+    end
     
     plot(p1, p2, layout=(1,2))
-
+    
     fraction = i / length(t_vals)
-    @info "Animation Progress: $(round(fraction * 100, digits=1))% (t = $(i))"
+    @info "Animation Progress: $(round(fraction * 100, digits=1))% (frame = $i of $(length(t_vals)))"
 end
 
-#   Save completed animation!
-mp4(anim, "side_by_side_N=$(N)_tN=$(tN).mp4", fps=1152)#576)
-
-@info "Animation complete! Saved as 'side_by_side_N=$(N)_tN=$(tN).mp4'."
+#    Save animation
+mp4(anim, "compare_ks.mp4", fps=1152)
+@info "Animation complete! Saved as 'compare_ks.mp4'."
