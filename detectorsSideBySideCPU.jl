@@ -25,104 +25,80 @@ global N = nothing
 
 sol_dir = "solution_data"
 
-#   Load saved solutions
-if length(ARGS) > 0
-    for sol_file in ARGS
-        k = parse(Float32, sol_file["k"])
+#   Parameters
+ks  = [0.5f0, 1.0f0, 2.0f0]  #    All values of k
+global N   = 100                    #    Number of spatial points
+global tN  = 200                   #    Number of frames
+L   = 1.0f0
+dx  = L / (N - 1)
+x   = range(0f0, stop=L, length=N)
 
-        newN = parse(Int, sol_file["N"])
-        if N == nothing
-            N = newN
-        elseif N != newN
-            error("Number of spatial points (N) must match for all loaded solutions!")
-        end
+#    Initial wave function is Gaussian wave packet
+psi0 = exp.(-((x .- 0.5f0).^2) ./ (2 * 0.1f0^2)) .* ComplexF32(1, 0)
 
-        newtN = parse(Int, sol_file["tN"])
-        if tN == nothing
-            tn = newtN
-        elseif tN != newtN
-            error("Number of frames (tN) must match for all loaded solutions!")
-        end
-
-        sol = deserialize(joinpath(sol_dir, sol_file))
-        solutions[k] = sol
-    end
-else
-    #   Parameters
-    ks  = [0.5f0, 1.0f0, 2.0f0]  #    All values of k
-    global N   = 864                    #    Number of spatial points
-    global tN  = 1728                   #    Number of frames
-    L   = 1.0f0
-    dx  = L / (N - 1)
-    x   = range(0f0, stop=L, length=N)
-
-    #    Initial wave function is Gaussian wave packet
-    psi0 = exp.(-((x .- 0.5f0).^2) ./ (2 * 0.1f0^2)) .* ComplexF32(1, 0)
-
-    #    Schrödinger equation ODE for a given k
-    function schrodinger!(dpsi_dt, psi, p, t)
-        k1, k2, dx = p
-        @inbounds begin
-            #    Initialize the derivative vector with complex entries
-            fill!(dpsi_dt, 0im)
-        
-            #    Derivative at interior points
-            @inbounds for j in 2:length(psi)-1
-                dpsi_dt[j] = im * (psi[j+1] - 2psi[j] + psi[j-1]) / dx^2
-            end
-        
-            #    Absorbing boundary at x=0
-            dpsi_dt[1] = im * ((psi[1] / (1 - im*k1*dx)) - 2*psi[1] + psi[2]) / dx^2
-            #    Absorbing boundary at x=1
-            dpsi_dt[end] = im * (psi[end-1] - 2*psi[end] + (psi[end] / (1 - im*k2*dx))) / dx^2
-        end
-    end
-
-    #    Time span
-    tspan = (0.0f0, 1.5f0)
-
-    #    Progress callback (for printing)
-    time_step_to_print = 0.05
-    next_time_trigger = Ref(tspan[1])
-    function condition(u, t, integrator)
-        if t >= next_time_trigger[]
-            next_time_trigger[] += time_step_to_print
-            return true
-        else
-            return false
-        end
-    end
-    function print_progress(integrator)
-        fraction = integrator.t / integrator.sol.prob.tspan[end] 
-        @info "PDE Progress: $(round(fraction * 100, digits=1))% (t = $(round(integrator.t, digits=2)))"
-    end
-    progress_cb = DiscreteCallback(condition, print_progress)
-
-    #    Solve for each value of k
-    for k in ks
-        @info "Solving PDE for k = $k ..."
-        prob = ODEProblem(
-            schrodinger!,
-            psi0,
-            tspan,
-            (k, k, dx)
-        )
+#    Schrödinger equation ODE for a given k
+function schrodinger!(dpsi_dt, psi, p, t)
+    k1, k2, dx = p
+    @inbounds begin
+        #    Initialize the derivative vector with complex entries
+        fill!(dpsi_dt, 0im)
     
-        sol = solve(
-            prob,
-            TRBDF2(autodiff=false),
-            saveat = range(tspan[1], tspan[2], length=tN),
-            callback = progress_cb
-        )
+        #    Derivative at interior points
+        @inbounds for j in 2:length(psi)-1
+            dpsi_dt[j] = im * (psi[j+1] - 2psi[j] + psi[j-1]) / dx^2
+        end
     
-        solutions[k] = sol
-    
-        file_path = joinpath(sol_dir, "solution_k=$(k)_N=$(N)_tN=$(tN).jls")
-        serialize(file_path, sol)
-        println("Saved solution for k = $k to $file_path")
-
-        @info "Finished solving for k = $k."
+        #    Absorbing boundary at x=0
+        dpsi_dt[1] = im * ((psi[1] / (1 - im*k1*dx)) - 2*psi[1] + psi[2]) / dx^2
+        #    Absorbing boundary at x=1
+        dpsi_dt[end] = im * (psi[end-1] - 2*psi[end] + (psi[end] / (1 - im*k2*dx))) / dx^2
     end
+end
+
+#    Time span
+tspan = (0.0f0, 1.5f0)
+
+#    Progress callback (for printing)
+time_step_to_print = 0.05
+next_time_trigger = Ref(tspan[1])
+function condition(u, t, integrator)
+    if t >= next_time_trigger[]
+        next_time_trigger[] += time_step_to_print
+        return true
+    else
+        return false
+    end
+end
+function print_progress(integrator)
+    fraction = integrator.t / integrator.sol.prob.tspan[end] 
+    @info "PDE Progress: $(round(fraction * 100, digits=1))% (t = $(round(integrator.t, digits=2)))"
+end
+progress_cb = DiscreteCallback(condition, print_progress)
+
+#    Solve for each value of k
+for k in ks
+    @info "Solving PDE for k = $k ..."
+    prob = ODEProblem(
+        schrodinger!,
+        psi0,
+        tspan,
+        (k, k, dx)
+    )
+
+    sol = solve(
+        prob,
+        TRBDF2(autodiff=false),
+        saveat = range(tspan[1], tspan[2], length=tN),
+        callback = progress_cb
+    )
+
+    solutions[k] = sol
+
+    file_path = joinpath(sol_dir, "solution_k=$(k)_N=$(N)_tN=$(tN).jls")
+    serialize(file_path, sol)
+    println("Saved solution for k = $k to $file_path")
+
+    @info "Finished solving for k = $k."
 end
 
 @info "All PDE solutions complete/loaded. Creating side-by-side animation..."
